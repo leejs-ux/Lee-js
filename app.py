@@ -9,7 +9,7 @@ import json
 import re
 import time
 import google.generativeai as genai
-import gspread # 💡 구글 시트 조종 도구 장착!
+import gspread
 
 st.set_page_config(page_title="2D DXF 자동 견적 시스템", page_icon="⚙️", layout="wide")
 
@@ -22,7 +22,6 @@ SHEET_NAME = "견적프로그램_DB"
 def init_gspread():
     if "google_credentials" in st.secrets:
         try:
-            # 금고(Secrets)에서 출입증을 꺼내서 구글 시트에 로그인합니다.
             cred_dict = json.loads(st.secrets["google_credentials"], strict=False)
             gc = gspread.service_account_from_dict(cred_dict)
             return gc
@@ -75,6 +74,7 @@ def safe_float(value):
 # =========================================================================
 # 1. 기준 단가표 관리 (구글 시트 연동)
 # =========================================================================
+# 기본값 (시트가 비어있거나 에러날 때 사용)
 default_material_db = pd.DataFrame({
     '재질': ['SS400', 'S45C', 'SPCC(레이져)', 'SM45C', 'AL2017', 'AL5052고베판', 'AL6061판재', 'AL7075', 'SUS304', 'BS(신주)', 'MC 나이론', '아세탈', '테프론', 'PC (국산)', 'PUR.'],
     'KG당 단가': [2400, 2400, 1500, 2400, 25000, 9300, 8000, 11500, 7650, 10000, 12000, 15000, 40000, 10000, 15000],
@@ -86,7 +86,6 @@ default_post_db = pd.DataFrame({
     'KG당 단가': [1500, 2500, 6000, 3000, 2500, 6000, 1500, 1500, 800, 7000, 2500, 600]
 })
 
-# 구글 시트에서 재질 단가표 불러오기
 if 'material_db' not in st.session_state:
     if gc:
         try:
@@ -98,12 +97,11 @@ if 'material_db' not in st.session_state:
             else:
                 ws_m.update([default_material_db.columns.values.tolist()] + default_material_db.astype(str).values.tolist())
                 st.session_state.material_db = default_material_db
-        except Exception as e:
+        except Exception:
             st.session_state.material_db = default_material_db
     else:
         st.session_state.material_db = default_material_db
 
-# 구글 시트에서 후처리 단가표 불러오기
 if 'post_db' not in st.session_state:
     if gc:
         try:
@@ -115,7 +113,7 @@ if 'post_db' not in st.session_state:
             else:
                 ws_p.update([default_post_db.columns.values.tolist()] + default_post_db.astype(str).values.tolist())
                 st.session_state.post_db = default_post_db
-        except Exception as e:
+        except Exception:
             st.session_state.post_db = default_post_db
     else:
         st.session_state.post_db = default_post_db
@@ -155,10 +153,11 @@ with st.expander("📊 1. 기준 단가표 관리 (클릭하여 펼치기)"):
 st.markdown("---")
 
 # =========================================================================
-# 2. DXF 업로드 및 AI 분석
+# 🤖 진짜 AI (Gemini) 파싱 함수 - 범용성 대폭 강화!
 # =========================================================================
 def analyze_with_gemini(filename, text_data, geometry_info, api_key):
     genai.configure(api_key=api_key)
+    
     target_model_name = ""
     try:
         available_models = genai.list_models()
@@ -170,37 +169,45 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
                         break
     except Exception as e:
         st.error(f"⚠️ [{filename}] AI 모델 탐색 에러: {e}")
-        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 탐색 에러: {e}"}
+        return {"도면번호": filename, "품명": "분석 실패", "재질": "미정", "수량": 1, "가로": 0, "세로": 0, "두께": 0, "후처리": "없음", "비고": f"AI 탐색 에러: {e}"}
     
     if not target_model_name:
         target_model_name = "gemini-1.5-flash"
         
     model = genai.GenerativeModel(target_model_name)
     
+    # 💡 도면 폼이 바뀌어도 확실하게 데이터를 뽑아내도록 명령어를 대폭 강화했습니다.
     prompt = f"""
-    너는 한국의 2D 가공 도면(DXF) 견적 전문가야.
-    아래는 '{filename}' 도면 파일에서 추출한 형상 정보(구멍/치수 개수)와 텍스트들이야.
-    
-    [기하학적 형상 정보]
-    {geometry_info}
-    
-    [추출된 텍스트 시작]
-    {text_data}
-    [추출된 텍스트 끝]
-    
-    이 정보를 종합해서 아래 JSON 형식으로만 완벽하게 대답해줘. 다른 말은 하지마.
-    '비고'란에는 도면 주서뿐만 아니라 전달받은 [형상 정보]를 포함하여 가공 난이도를 유추할 수 있도록 자세히 기록해줘.
-    
+    당신은 대한민국 가공업계 베테랑 도면 분석 전문가입니다. DXF 도면에서 추출한 '무작위 텍스트 덩어리'를 정밀 해독하여 견적 핵심 데이터를 JSON 형식으로 추출해야 합니다.
+
+    **🚨 도면 폼(양식)이 다르더라도 문제없이 데이터를 찾기 위한 엄격 지침:**
+
+    1.  **표제란(Title Block) 및 부품표(Parts List) 우선 탐색:** 도면 오른쪽 하단이나 상단에 위치한 '표(Table)' 형태의 텍스트 밀집 구역을 먼저 읽으십시오. 용어(헤더) 아래에 있는 값을 찾으세요.
+    2.  **용어 범용성(Synonyms) 고려:**
+        * **재질:** '재질', 'MAT'L', 'MATERIAL', 'MATE', 'MAT' 등을 찾고 그 근처 값을 읽으십시오. (예: "MC (흑색)" -> 'MC' 또는 'MC 나이론'으로 매핑)
+        * **규격/치수:** '규격', '규 격', 'SPEC.', 'SIZE', 'DIMENSION' 등을 찾으십시오. 특히 키워드 근처에서 **"숫자x숫자x숫자"** 또는 "숫자*숫자*숫자" 패턴(예: 35X130X360)을 발견하면 순서대로 가로, 세로, 두께(또는 임의)로 간주하고 숫자만 추출하십시오. 이것은 치수선 값보다 우선합니다.
+        * **수량:** '수량', 'Q'TY', 'QTY', 'QUANTITY' 등을 찾고 그 아래 값을 읽으십시오. 파일 갯수가 아니라 도면에 적힌 수량을 찾아야 합니다.
+    3.  **데이터 정리 및 매핑:**
+        * 수량, 가로, 세로, 두께는 오직 **'숫자'**만 적으십시오. (문자 제외)
+        * 재질은 가장 적합한 표준 명칭(예: MC, SUS304, AL6061)을 추론하여 적으십시오.
+
+    [제공된 데이터]
+    -   파일명: '{filename}'
+    -   도면 추출 기하 정보: {geometry_info}
+    -   도면 추출 텍스트: {text_data}
+
+    이 정보를 종합하여 **아래 JSON 형식으로만** 완벽하게 대답하십시오.
+
     {{
-        "도면번호": "문자열 (도면명)",
-        "품명": "문자열",
-        "재질": "문자열 (예: SS400, SUS304 등)",
-        "수량": 정수,
-        "가로": 숫자,
-        "세로": 숫자,
-        "두께": 숫자,
-        "후처리": "문자열 (없으면 '없음')",
-        "비고": "가공 특징 및 특이사항 요약"
+        "도면번호": "문자열 (DWG.NO. 칸 등 탐색)",
+        "품명": "문자열 (TITLE 칸 등 탐색, 예: V-Block)",
+        "재질": "문자열 (MAT'L 칸 탐색, 없으면 '미정')",
+        "수량": 정수 (Q'TY 칸 탐색, 찾을 수 없으면 1),
+        "가로": 숫자 (SPEC 칸의 'AxBxC' 패턴 또는 최대치수, 찾을 수 없으면 0),
+        "세로": 숫자 (SPEC 칸의 'AxBxC' 패턴 또는 두번째치수, 찾을 수 없으면 0),
+        "두께": 숫자 (SPEC 칸의 'AxBxC' 패턴 또는 두께 치수, 찾을 수 없으면 0),
+        "후처리": "문자열 (주서란 등 탐색, 없으면 '없음')",
+        "비고": "도면의 특징(예: Bending, Tap 정보), 추출 기하 정보 요약 및 주서 요약"
     }}
     """
     
@@ -217,8 +224,11 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
         return parsed_data
     except Exception as e:
         st.error(f"⚠️ [{filename}] AI 분석 중 에러 발생: {e}")
-        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"생성 에러: {e}"}
+        return {"도면번호": filename, "품명": "분석 실패", "재질": "미정", "수량": 1, "가로": 0, "세로": 0, "두께": 0, "후처리": "없음", "비고": f"생성 에러: {e}"}
 
+# =========================================================================
+# 2. DXF 업로드 및 실시간 AI 분석 로직
+# =========================================================================
 st.subheader("2. DXF 도면 업로드 및 AI 분석")
 uploaded_files = st.file_uploader("📂 DXF 도면들을 드래그 앤 드롭 하세요.", type=['dxf'], accept_multiple_files=True)
 
@@ -230,7 +240,7 @@ if uploaded_files:
         
         if st.session_state.uploaded_file_names != current_file_names:
             parsed_results = []
-            with st.spinner("🤖 진짜 AI가 도면 형상과 텍스트를 정밀 해독하고 있습니다... (과부하 방지를 위해 조금 천천히 진행됩니다)"):
+            with st.spinner("🤖 베테랑 AI가 새로운 명령어 지침에 따라 도면 폼을 분석하고 데이터를 추출하고 있습니다..."):
                 for idx, file in enumerate(uploaded_files):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
                         tmp_file.write(file.getvalue())
@@ -241,6 +251,7 @@ if uploaded_files:
                         msp = doc.modelspace()
                         
                         extracted_texts = [e.dxf.text for e in msp.query('TEXT MTEXT') if hasattr(e.dxf, 'text') and e.dxf.text]
+                        # AI에게 더 많은 문맥을 제공하기 위해 띄어쓰기를 더 명확히 유지
                         clean_texts = " | ".join([t.strip() for t in extracted_texts if t.strip()])
                         
                         tolerance_keywords = ['±', '%%p', '+', '-', 'H7', 'h7']
@@ -252,23 +263,38 @@ if uploaded_files:
                         
                         ai_result = analyze_with_gemini(file.name, clean_texts, geometry_info, api_key)
                         
+                        # AI가 가져온 숫자를 safe_float로 세탁
                         w = safe_float(ai_result.get("가로", 0))
                         h = safe_float(ai_result.get("세로", 0))
                         t = safe_float(ai_result.get("두께", 0))
+                        qty = ai_result.get("수량", 1)
+                        if not isinstance(qty, int): # 수량이 정수가 아니면 1로 강제
+                             qty = 1
                         
                         ai_result["가로"] = w
                         ai_result["세로"] = h
                         ai_result["두께"] = t
+                        ai_result["수량"] = qty
                         
-                        mat_name = ai_result.get("재질", "SS400")
+                        mat_name = ai_result.get("재질", "미정")
                         post_name = ai_result.get("후처리", "없음")
                         
-                        mat_info = st.session_state.material_db[st.session_state.material_db['재질'] == mat_name]
+                        # 💡 재질 단가표 매핑 개선 (MC 흑색 같은 값을 DB의 'MC 나이론'에 매핑 시도)
+                        mat_info = pd.DataFrame()
+                        for idx, db_row in st.session_state.material_db.iterrows():
+                             if str(db_row['재질']).lower() in str(mat_name).lower(): # 예: 'mc' 가 'mc 나이론'에 포함되면
+                                  mat_info = st.session_state.material_db.iloc[[idx]]
+                                  break
+                        
+                        if mat_info.empty: # 못 찾았으면 원본 이름으로 시도
+                             mat_info = st.session_state.material_db[st.session_state.material_db['재질'] == mat_name]
+
                         if not mat_info.empty:
                             weight_ratio = mat_info['비중'].values[0]
                             mat_price_per_kg = mat_info['KG당 단가'].values[0]
                             volume = w * h * t 
-                            weight = volume * weight_ratio / 1000000
+                            # 비중 계산 (mm단위 치수이므로 10^6으로 나눔)
+                            weight = volume * weight_ratio / 1000000 
                             ai_result["소재비"] = int(weight * mat_price_per_kg)
                         else:
                             ai_result["소재비"] = 0
@@ -281,6 +307,7 @@ if uploaded_files:
                             ai_result["후처리비"] = 0
                         
                         ai_result["가공비(수동입력)"] = 0 
+                        # 총합계 계산 (수량 곱하기는 엑셀 발행 시 진행)
                         ai_result["최종합계"] = ai_result["소재비"] + ai_result["후처리비"]
                         
                         parsed_results.append(ai_result)
@@ -296,7 +323,7 @@ if uploaded_files:
             st.session_state.parsed_df = pd.DataFrame(parsed_results)
             st.session_state.uploaded_file_names = current_file_names
 
-        st.success("✅ AI 도면 분석 및 기초 단가 계산이 완료되었습니다!")
+        st.success("✅ 새로운 베테랑 지침에 따른 AI 도면 분석 및 기초 단가 계산이 완료되었습니다!")
 
         # 💡 과거 이력 조회 (구글 시트 연동)
         if gc and not st.session_state.parsed_df.empty:
@@ -315,8 +342,8 @@ if uploaded_files:
                             last_quote = matches.iloc[-1]
                             st.warning(f"🕒 **과거 이력 발견!** [{drw_no}] 도면은 구글 시트에 기존 견적 이력이 있습니다. \n"
                                        f"👉 **이전 기록:** 가공비 {last_quote.get('가공비(수동입력)', 0):,}원 / 최종합계 {last_quote.get('최종합계', 0):,}원 (비고: {last_quote.get('비고', '없음')})")
-            except Exception as e:
-                pass # 구글 시트가 비어있을 땐 조용히 패스
+            except Exception:
+                pass 
 
         if not st.session_state.parsed_df.empty:
             st.markdown("---")
@@ -334,29 +361,26 @@ if uploaded_files:
             final_df = edited_df.copy()
             final_df["최종합계"] = final_df["소재비"] + final_df["후처리비"] + final_df["가공비(수동입력)"]
 
-            st.markdown(f"### 💰 전체 프로젝트 총 견적액: **{final_df['최종합계'].sum():,} 원**")
+            st.markdown(f"### 💰 전체 프로젝트 총 견적액 (수량 미반영 개당 단가): **{final_df['최종합계'].sum():,} 원**")
 
             st.markdown("---")
             st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
             
             if st.button("🚀 견적 확정 및 엑셀 폼 발행하기"):
-                # 💡 구글 시트(DB)에 누적 저장하기
                 if gc:
                     try:
                         sh = gc.open(SHEET_NAME)
                         ws_q = sh.worksheet("Quote_Database")
                         data_q = ws_q.get_all_values()
-                        if not data_q: # 비어있으면 헤더(제목)부터 넣기
+                        if not data_q: 
                             ws_q.update([final_df.columns.values.tolist()] + final_df.astype(str).values.tolist())
-                        else: # 이미 있으면 그 밑에 추가하기
+                        else: 
                             ws_q.append_rows(final_df.astype(str).values.tolist())
-                        st.success(f"✅ DB 누적 완료! (미래 딥러닝을 위해 구글 시트에 영구 저장되었습니다 📊)")
+                        st.success(f"✅ DB 누적 완료!")
                     except Exception as e:
                         st.error(f"⚠️ 구글 시트 누적 저장 실패: {e}")
-                else:
-                    st.warning("⚠️ 구글 시트와 연결되지 않아 DB 누적이 생략되었습니다.")
                 
-                # 엑셀 다운로드
+                # 엑셀 다운로드 (최종 양식에는 수량을 곱해서 발행)
                 template_path = "견적서.xlsx"
                 try:
                     wb = openpyxl.load_workbook(template_path)
@@ -366,16 +390,18 @@ if uploaded_files:
                     for index, row in final_df.iterrows():
                         current_row = start_row + index
                         size_spec = f"{row['가로']} x {row['세로']} x {row['두께']}"
+                        qty = row['수량']
                         
                         ws.cell(row=current_row, column=1).value = index + 1
                         ws.cell(row=current_row, column=2).value = row['도면번호']
                         ws.cell(row=current_row, column=3).value = row['품명']
                         ws.cell(row=current_row, column=4).value = size_spec
                         ws.cell(row=current_row, column=6).value = row['후처리']
-                        ws.cell(row=current_row, column=7).value = row['수량']
-                        ws.cell(row=current_row, column=8).value = row['소재비']
-                        ws.cell(row=current_row, column=9).value = row['가공비(수동입력)']
-                        ws.cell(row=current_row, column=10).value = row['후처리비']
+                        ws.cell(row=current_row, column=7).value = qty
+                        # 최종 발행 시 개당 단가에 수량을 곱해서 엑셀에 기입
+                        ws.cell(row=current_row, column=8).value = row['소재비'] * qty
+                        ws.cell(row=current_row, column=9).value = row['가공비(수동입력)'] * qty
+                        ws.cell(row=current_row, column=10).value = row['후처리비'] * qty
                         ws.cell(row=current_row, column=16).value = row['비고']
 
                     output = BytesIO()
