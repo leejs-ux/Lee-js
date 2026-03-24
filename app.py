@@ -96,7 +96,6 @@ st.markdown("---")
 def analyze_with_gemini(filename, text_data, geometry_info, api_key):
     genai.configure(api_key=api_key)
     
-    # 💡 [초강력 방어막] 현재 쓸 수 있는 최신 AI(예: gemini-2.5-flash 등)를 서버에 직접 물어보고 스스로 선택합니다!
     target_model_name = ""
     try:
         available_models = genai.list_models()
@@ -104,13 +103,13 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
             if 'generateContent' in m.supported_generation_methods:
                 if 'gemini' in m.name.lower():
                     target_model_name = m.name
-                    # flash 모델을 찾으면 가장 우선적으로 선택 (제일 빠르고 저렴함)
                     if 'flash' in m.name.lower():
                         break
     except Exception as e:
+        # 💡 빨간색 에러 창 복구!
+        st.error(f"⚠️ [{filename}] AI 모델 탐색 에러: {e}")
         return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 모델 탐색 에러: {e}"}
     
-    # 만약 위에서 못 찾았다면 최후의 보루로 강제 지정
     if not target_model_name:
         target_model_name = "gemini-1.5-flash"
         
@@ -156,6 +155,8 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
         return parsed_data
         
     except Exception as e:
+        # 💡 빨간색 에러 창 복구!
+        st.error(f"⚠️ [{filename}] AI 분석 중 에러 발생: {e}")
         return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"내용 생성 에러: {e}"}
 
 st.subheader("2. DXF 도면 업로드 및 AI 분석")
