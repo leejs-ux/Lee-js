@@ -15,9 +15,20 @@ import gspread
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# 한글 폰트 깨짐 방지 설정 (Streamlit Cloud 환경 고려)
+# 리눅스 환경의 나눔고딕 또는 윈도우의 맑은 고딕 자동 탐색 및 적용
+font_list = [f.name for f in fm.fontManager.ttflist]
+if 'NanumGothic' in font_list:
+    plt.rc('font', family='NanumGothic')
+elif 'Malgun Gothic' in font_list:
+    plt.rc('font', family='Malgun Gothic')
+plt.rcParams['axes.unicode_minus'] = False # 마이너스 기호 깨짐 방지
+
 from ezdxf.addons.drawing import RenderContext, Frontend
 from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-from PIL import Image # AI에게 이미지를 전달할 정식 도구
+from PIL import Image
 
 st.set_page_config(page_title="2D DXF 하이브리드 자동 견적 시스템", page_icon="👁️", layout="wide")
 
@@ -146,7 +157,7 @@ st.markdown("---")
 def dxf_to_image(doc):
     try:
         msp = doc.modelspace()
-        fig = plt.figure(figsize=(12, 9), dpi=150) # 해상도를 높여 선명하게 캡처
+        fig = plt.figure(figsize=(12, 9), dpi=200) # 해상도를 200으로 소폭 상향하여 AI의 시력 확보
         ax = fig.add_axes([0, 0, 1, 1])
         ax.axis('off') # 테두리 제거
         
@@ -170,45 +181,43 @@ def dxf_to_image(doc):
 # =========================================================================
 def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_key):
     genai.configure(api_key=api_key)
-    
-    # 이미지 분석에 가장 뛰어난 최신 1.5 플래시 모델 사용
     target_model_name = "gemini-1.5-flash"
     
     try:
         model = genai.GenerativeModel(target_model_name)
         
+        # 💡 프롬프트 고도화: V-Block 등 다양한 양식에 대응하기 위한 상세 지시문 추가
         prompt = f"""
-        당신은 대한민국 최고 수준의 2D 가공 도면 해독 전문가입니다.
-        이번엔 특별히 **도면 캡처 이미지**와 도면에서 추출한 **텍스트 데이터**를 동시에 제공합니다.
+        당신은 대한민국 최고 수준의 2D 가공 도면(DXF) 해독 수석 엔지니어입니다.
+        제공된 **도면 이미지**와 추출된 **텍스트 데이터**를 조합하여 완벽한 견적 데이터를 산출하세요.
 
         [도면 해독 핵심 지침]
-        1. 제공된 '도면 이미지'를 눈으로 직접 확인하여 표제란(부품표)의 위치와 형상의 가공 난이도를 파악하세요.
-        2. 이미지 내의 한글이 네모(ㅁㅁㅁ)로 깨져 보일 수 있습니다. 당황하지 말고 제공된 [추출된 텍스트]에서 알맞은 글자를 찾아 짝을 맞추세요. (예: 표에 'ㅁㅁ'이 있고 텍스트에 'MC'가 있다면 재질은 'MC'입니다.)
-        3. 표제란을 눈으로 찾아 재질, 규격(크기), 수량을 우선적으로 매핑하세요.
-        4. SPEC이나 규격 칸에 적힌 "숫자X숫자X숫자" (예: 35X130X360) 패턴을 찾으면 가로, 세로, 두께로 완벽히 매핑하세요.
-        5. 수량(Q'TY, 수량 등)을 정확히 찾아 숫자로 적으세요.
+        1. **표제란(Title Block) 탐색:** 주로 우측 하단이나 상단에 위치한 표(Table)를 눈으로 먼저 찾으세요. DWG NO, TITLE, MAT'L(재질), Q'TY(수량)가 적혀있습니다.
+        2. **텍스트 매핑 교차검증 (중요):** 이미지 내 한글이나 폰트가 네모(ㅁㅁ)로 깨져 보일 수 있습니다. 이 때는 무조건 제공된 [추출된 텍스트]에서 해당 위치에 들어갈 법한 단어를 유추하여 짝을 맞추세요.
+        3. **규격(가로x세로x두께) 파악:** - 표제란의 SPEC이나 SIZE 칸에 "숫자X숫자X숫자" (예: 35X130X360) 패턴이 있다면 이를 우선시 하세요.
+           - 만약 표제란에 규격이 없다면, 도면 형상에 기입된 가장 긴 치수들을 파악하여 외형 최대 사이즈(가로, 세로, 두께)를 직접 추론하세요.
+        4. **가공 난이도 평가:** 제공된 [기하 정보] (구멍 개수, 공차, 치수 기입 개수)와 형상을 보고 "비고" 란에 가공 특이사항(예: 탭 가공 많음, 공차 정밀함, V-Block 형상 등)을 요약하세요.
 
         [추출된 기하 정보]
         {geometry_info}
         
-        [추출된 텍스트 (정확한 글자와 숫자)]
+        [추출된 텍스트 (깨지지 않은 원본 글자들)]
         {text_data}
 
-        이 모든 시각 정보와 텍스트 문맥을 종합하여, 오직 아래 JSON 형식으로만 대답하세요.
+        반드시 아래의 순수 JSON 포맷으로만 응답하세요. 백틱(```)이나 부연 설명은 절대 금지합니다.
         {{
-            "도면번호": "문자열 (DWG.NO)",
-            "품명": "문자열 (TITLE)",
-            "재질": "문자열 (MC, SUS304 등)",
+            "도면번호": "문자열 (도면번호)",
+            "품명": "문자열 (품명)",
+            "재질": "문자열 (예: MC, SUS304 등)",
             "수량": 정수,
             "가로": 숫자,
             "세로": 숫자,
             "두께": 숫자,
             "후처리": "문자열 (없으면 '없음')",
-            "비고": "도면 가공 특징 및 특이사항 요약 (이미지로 본 형상 난이도 필수 포함)"
+            "비고": "형상 요약 및 난이도 분석"
         }}
         """
         
-        # 💡 프롬프트와 이미지를 동시에 던지는 하이브리드 리스트 구성!
         contents = [prompt]
         if img_obj is not None:
             contents.append(img_obj)
@@ -216,13 +225,15 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         response = model.generate_content(contents)
         result_text = response.text.strip()
         
-        if result_text.startswith("```json"):
-            result_text = result_text[7:-3].strip()
-        elif result_text.startswith("```"):
-            result_text = result_text[3:-3].strip()
+        # 💡 강력한 JSON 파싱: AI가 실수로 텍스트를 덧붙여도 JSON 블록만 정확히 추출
+        json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+        if json_match:
+            result_text = json_match.group(0)
             
         return json.loads(result_text)
         
+    except json.JSONDecodeError as je:
+        return {"도면번호": filename, "품명": "JSON 파싱 에러", "재질": "미정", "수량": 1, "가로": 0, "세로": 0, "두께": 0, "후처리": "없음", "비고": "AI가 JSON 형식을 지키지 않음"}
     except Exception as e:
         return {"도면번호": filename, "품명": "분석 실패", "재질": "미정", "수량": 1, "가로": 0, "세로": 0, "두께": 0, "후처리": "없음", "비고": f"AI 에러: {e}"}
 
@@ -240,7 +251,7 @@ if uploaded_files:
         
         if st.session_state.uploaded_file_names != current_file_names:
             parsed_results = []
-            with st.spinner("📸 AI가 도면을 사진으로 찍어 텍스트와 함께 정밀 교차 검증 중입니다... (1장당 약 5~10초 소요)"):
+            with st.spinner("📸 AI가 도면을 시각적으로 분석하고 텍스트와 정밀 교차 검증 중입니다... (1장당 약 5~10초 소요)"):
                 for idx, file in enumerate(uploaded_files):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
                         tmp_file.write(file.getvalue())
@@ -250,7 +261,7 @@ if uploaded_files:
                         doc = ezdxf.readfile(tmp_path)
                         msp = doc.modelspace()
                         
-                        # 1. 텍스트 추출 (100% 정확한 글자 및 숫자)
+                        # 1. 텍스트 추출
                         extracted_texts = [e.dxf.text for e in msp.query('TEXT MTEXT') if hasattr(e.dxf, 'text') and e.dxf.text]
                         clean_texts = " | ".join([t.strip() for t in extracted_texts if t.strip()])
                         
@@ -259,13 +270,13 @@ if uploaded_files:
                         num_dims = len(msp.query('DIMENSION'))
                         geometry_info = f"원(구멍) 갯수: {num_holes}개, 치수기입 갯수: {num_dims}개, 공차추정: {num_tols}건"
                         
-                        # 2. 도면을 이미지로 변환 (AI의 시각)
+                        # 2. 도면을 이미지로 변환 (AI의 시력 강화)
                         img_obj = dxf_to_image(doc)
                         
                         # 3. 하이브리드 분석 투척!
                         ai_result = analyze_with_hybrid_gemini(file.name, clean_texts, geometry_info, img_obj, api_key)
                         
-                        # 데이터 후처리 및 정제
+                        # 4. 데이터 정제 및 소재비 자동 계산
                         w = safe_float(ai_result.get("가로", 0))
                         h = safe_float(ai_result.get("세로", 0))
                         t = safe_float(ai_result.get("두께", 0))
@@ -275,10 +286,9 @@ if uploaded_files:
                         
                         ai_result["가로"], ai_result["세로"], ai_result["두께"], ai_result["수량"] = w, h, t, qty
                         
-                        mat_name = str(ai_result.get("재질", "미정"))
-                        post_name = str(ai_result.get("후처리", "없음"))
+                        mat_name = str(ai_result.get("재질", "미정")).strip()
+                        post_name = str(ai_result.get("후처리", "없음")).strip()
                         
-                        # 💡 재질 단가표 스마트 매핑 ('MC'라고만 해도 'MC 나이론'을 찾아냄)
                         mat_info = pd.DataFrame()
                         if mat_name and mat_name != "미정":
                             mask = st.session_state.material_db['재질'].astype(str).str.lower().str.contains(mat_name.lower(), na=False)
@@ -345,7 +355,6 @@ if uploaded_files:
             final_df = edited_df.copy()
             final_df["최종합계"] = final_df["소재비"] + final_df["후처리비"] + final_df["가공비(수동입력)"]
             
-            # 수량을 곱한 전체 프로젝트 총액 계산
             total_sum = sum(final_df["최종합계"] * final_df["수량"])
             st.markdown(f"### 💰 전체 프로젝트 총 견적액 (수량 반영): **{total_sum:,} 원**")
 
@@ -363,32 +372,34 @@ if uploaded_files:
                             ws_q.append_rows(final_df.astype(str).values.tolist())
                         st.success(f"✅ 구글 시트 DB 누적 완료!")
                     except Exception as e: 
-                        st.error(f"⚠️ 저장 실패: {e}")
+                        st.error(f"⚠️ 구글 시트 저장 실패: {e}")
                 
                 try:
-                    wb = openpyxl.load_workbook("견적서.xlsx")
-                    ws = wb["견적서(을지)"] if "견적서(을지)" in wb.sheetnames else wb.active
-                    
-                    start_row = 7
-                    for index, row in final_df.iterrows():
-                        current_row = start_row + index
-                        qty = int(row['수량'])
+                    if not os.path.exists("견적서.xlsx"):
+                        st.error("⚠️ 서버에 '견적서.xlsx' 템플릿 파일이 없습니다! GitHub 저장소에 양식 파일을 업로드해주세요.")
+                    else:
+                        wb = openpyxl.load_workbook("견적서.xlsx")
+                        ws = wb["견적서(을지)"] if "견적서(을지)" in wb.sheetnames else wb.active
                         
-                        ws.cell(row=current_row, column=1).value = index + 1
-                        ws.cell(row=current_row, column=2).value = row['도면번호']
-                        ws.cell(row=current_row, column=3).value = row['품명']
-                        ws.cell(row=current_row, column=4).value = f"{row['가로']} x {row['세로']} x {row['두께']}"
-                        ws.cell(row=current_row, column=6).value = row['후처리']
-                        ws.cell(row=current_row, column=7).value = qty
-                        
-                        # 엑셀 기입 시 개당 단가에 수량을 곱해서 입력
-                        ws.cell(row=current_row, column=8).value = int(row['소재비']) * qty
-                        ws.cell(row=current_row, column=9).value = int(row['가공비(수동입력)']) * qty
-                        ws.cell(row=current_row, column=10).value = int(row['후처리비']) * qty
-                        ws.cell(row=current_row, column=16).value = row['비고']
-                        
-                    output = BytesIO()
-                    wb.save(output)
-                    st.download_button(label="📊 회사 양식 최종 엑셀 다운로드 (.xlsx)", data=output.getvalue(), file_name="최종견적서_발행.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        start_row = 7
+                        for index, row in final_df.iterrows():
+                            current_row = start_row + index
+                            qty = int(row['수량'])
+                            
+                            ws.cell(row=current_row, column=1).value = index + 1
+                            ws.cell(row=current_row, column=2).value = row['도면번호']
+                            ws.cell(row=current_row, column=3).value = row['품명']
+                            ws.cell(row=current_row, column=4).value = f"{row['가로']} x {row['세로']} x {row['두께']}"
+                            ws.cell(row=current_row, column=6).value = row['후처리']
+                            ws.cell(row=current_row, column=7).value = qty
+                            
+                            ws.cell(row=current_row, column=8).value = int(row['소재비']) * qty
+                            ws.cell(row=current_row, column=9).value = int(row['가공비(수동입력)']) * qty
+                            ws.cell(row=current_row, column=10).value = int(row['후처리비']) * qty
+                            ws.cell(row=current_row, column=16).value = row['비고']
+                            
+                        output = BytesIO()
+                        wb.save(output)
+                        st.download_button(label="📊 회사 양식 최종 엑셀 다운로드 (.xlsx)", data=output.getvalue(), file_name="최종견적서_발행.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e: 
                     st.error(f"⚠️ 엑셀 템플릿 처리 중 오류: {e}")
