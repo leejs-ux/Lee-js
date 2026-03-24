@@ -79,7 +79,7 @@ def recalculate_costs(df, mat_db, post_db):
         mat_name = str(row.get("재질", "미정")).strip()
         post_name = str(row.get("후처리", "없음")).strip()
         
-        # 재질 매핑 (AI가 이미 잘 맞춰주겠지만, 혹시 모를 오차를 위해 이중 확인)
+        # 재질 매핑
         mat_info = pd.DataFrame()
         if mat_name and mat_name != "미정":
             mask = mat_db['재질'].astype(str).str.lower().str.contains(mat_name.lower(), na=False)
@@ -183,7 +183,7 @@ def dxf_to_image(doc):
     except Exception as e:
         return None
 
-# 💡 [핵심 강화] DB 목록을 AI에게 전달하는 매개변수 추가
+# 💡 [핵심 강화] 가로, 세로, 두께, 재질을 무조건 찾아내도록 프롬프트(명령어) 집요하게 강화!
 def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_key, available_materials, available_posts):
     genai.configure(api_key=api_key)
     target_model_name = "gemini-1.5-flash"
@@ -207,13 +207,10 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         - 보유 후처리: {available_posts}
 
         [도면 해독 지침]
-        1. 시각적 유추: 도면 형상을 보고 어떤 가공이 주를 이루는지 파악하세요 (밀링, 선반, 레이저, 판금, 용접 중 택).
-        2. 시간 추론: 형상의 복잡도를 파악하여 '예상 가공 시간'을 추론하세요.
-        3. [매우 중요] 재질 및 후처리 매핑:
-           - 도면에 적힌 재질/후처리가 [우리 회사 DB 보유 목록]에 있는 항목의 동의어거나 같은 종류라면(예: 'MC흑색'->'MC 나이론'), 반드시 **DB에 등록된 정확한 명칭**으로 통일해서 적으세요.
-           - 단, DB 목록에 전혀 없는 새로운 재질이거나 확신할 수 없다면, 억지로 DB 목록에 맞추지 말고 **도면에 적힌 원본 글자 그대로** 적으세요.
-        4. 표제란을 우선 탐색하여 규격(숫자X숫자X숫자 패턴)과 수량을 매핑하세요.
-        5. '비고' 란을 구체적으로 작성하세요. [추출된 기하 정보]를 바탕으로 홀/치수/공차 개수를 명시하고, 형상을 바탕으로 가공 특이사항과 주의할 점을 꼼꼼히 적으세요.
+        1. 가공방법/시간: 형상을 보고 가공법(밀링, 선반, 판금 등)과 예상 가공 시간을 추론하세요.
+        2. 재질 탐색 (필수): 표제란의 MAT'L, MATERIAL, 재질 칸을 찾아내세요. 이미지 글씨가 깨졌다면 텍스트에서 'MC', 'SS400', 'AL' 등을 무조건 찾아 [보유 재질] 목록과 매칭하세요.
+        3. 치수 탐색 (필수): 표제란에 '숫자X숫자X숫자' 형태가 없다면, 도면 위에 적힌 **가장 큰 치수선 숫자들**을 찾아내어 가로와 세로로 지정하세요. 절대 0으로 비워두지 마세요.
+        4. 비고란 작성: 홀 개수, 공차, 특이사항을 전문가처럼 상세히 적으세요.
 
         [추출된 기하 정보]
         {geometry_info}
@@ -221,19 +218,19 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         [추출된 텍스트]
         {text_data}
 
-        오직 아래 JSON 형식으로만 대답하세요. 절대 다른 설명은 붙이지 마세요.
+        오직 아래 JSON 형식으로만 대답하세요.
         {{
             "도면번호": "문자열 (DWG.NO)",
             "품명": "문자열 (TITLE)",
-            "재질": "문자열 (DB명칭 변환 혹은 도면 원본)",
-            "수량": 정수,
-            "가로": 숫자,
-            "세로": 숫자,
-            "두께": 숫자,
+            "재질": "문자열 (도면에서 찾은 재질을 DB명칭으로 변환, 정 못 찾겠으면 도면 글자 그대로 적을 것. 비워두지 말 것.)",
+            "수량": 정수 (Q'TY, 수량 칸. 없으면 1),
+            "가로": 숫자 (SPEC 칸 치수 또는 도면 내에서 찾은 가장 큰 가로 치수 숫자),
+            "세로": 숫자 (SPEC 칸 치수 또는 도면 내에서 찾은 두 번째로 큰 세로 치수 숫자),
+            "두께": 숫자 (도면 내에서 확인된 두께 치수, 모르면 0),
             "후처리": "문자열",
             "가공방법": "문자열",
             "예상가공시간": "문자열",
-            "비고": "문자열 (예시: '▶특이사항: 탭 가공 및 깊은 포켓 존재 ▶주의사항: H7 끼워맞춤 공차 주의 ▶분석정보: 홀 5개, 공차 2건, 치수 15개')"
+            "비고": "문자열 (예시: '▶특이사항: 깊은 포켓 존재 ▶주의사항: H7 공차 주의 ▶분석정보: 홀 5개, 공차 2건, 치수 15개')"
         }}
         """
         
@@ -278,7 +275,6 @@ if uploaded_files:
             
             if added_files:
                 new_parsed_results = []
-                # 💡 [핵심] 현재 DB에 있는 재질/후처리 목록을 문자열로 예쁘게 뽑아서 AI에게 넘길 준비를 합니다.
                 db_materials_str = ", ".join(st.session_state.material_db['재질'].astype(str).tolist())
                 db_posts_str = ", ".join(st.session_state.post_db['표면처리'].astype(str).tolist())
 
@@ -301,7 +297,6 @@ if uploaded_files:
                             geometry_info = f"원 갯수: {num_holes}개, 치수 갯수: {num_dims}개, 공차: {num_tols}건"
                             
                             img_obj = dxf_to_image(doc)
-                            # 💡 함수 호출 시 DB 메뉴판 2개(재질, 후처리)를 같이 던져줍니다!
                             ai_result = analyze_with_hybrid_gemini(file.name, clean_texts, geometry_info, img_obj, api_key, db_materials_str, db_posts_str)
                             
                             ai_result["가로"] = safe_float(ai_result.get("가로", 0))
