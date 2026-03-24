@@ -7,14 +7,11 @@ from io import BytesIO
 import openpyxl
 import json
 import re
-import time # 💡 1분당 속도 제한을 피하기 위한 휴식 도구 추가!
+import time
 import google.generativeai as genai
 
 st.set_page_config(page_title="2D DXF 자동 견적 시스템", page_icon="⚙️", layout="wide")
 
-# =========================================================================
-# 🔑 API 키 자동 저장/불러오기 로직
-# =========================================================================
 API_KEY_FILE = "api_key.txt"
 
 def load_api_key():
@@ -41,9 +38,6 @@ if st.sidebar.button("💾 API 키 저장하기"):
 st.title("⚙️ 2D DXF 기반 하이브리드 자동/반자동 견적 시스템")
 st.markdown("---")
 
-# =========================================================================
-# 💡 문자열에서 숫자만 강제로 뽑아내는 안전 필터 함수
-# =========================================================================
 def safe_float(value):
     try:
         if isinstance(value, (int, float)):
@@ -53,9 +47,6 @@ def safe_float(value):
     except:
         return 0.0
 
-# =========================================================================
-# 1. 기준 단가표 관리 (CSV 파일 연동 및 영구 저장)
-# =========================================================================
 MATERIAL_FILE = "material_db.csv"
 POST_FILE = "post_db.csv"
 DB_FILE = "Quote_Database.csv"
@@ -102,23 +93,20 @@ with st.expander("📊 1. 기준 단가표 관리 (클릭하여 펼치기)"):
 
 st.markdown("---")
 
-# =========================================================================
-# 🤖 진짜 AI (Gemini) 파싱 함수
-# =========================================================================
 def analyze_with_gemini(filename, text_data, geometry_info, api_key):
     genai.configure(api_key=api_key)
     
-    target_model_name = "gemini-1.5-flash"
+    # 💡 [핵심 방어막] 클라우드 서버에서 에러가 나지 않도록 가장 안정적인 모델을 기본값으로 강제 지정합니다!
+    target_model_name = "gemini-pro" 
     try:
         available_models = genai.list_models()
         for m in available_models:
             if 'generateContent' in m.supported_generation_methods:
-                if 'gemini' in m.name.lower():
+                if 'gemini' in m.name.lower() and 'flash' in m.name.lower():
                     target_model_name = m.name
-                    if 'flash' in m.name.lower():
-                        break
-    except Exception as e:
-        print(f"모델 탐색 실패: {e}")
+                    break
+    except:
+        pass
         
     model = genai.GenerativeModel(target_model_name)
     
@@ -162,12 +150,8 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
         return parsed_data
         
     except Exception as e:
-        st.error(f"⚠️ AI 분석 에러 발생: {e}")
         return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 에러: {e}"}
 
-# =========================================================================
-# 2. DXF 업로드 및 실시간 AI 분석 로직
-# =========================================================================
 st.subheader("2. DXF 도면 업로드 및 AI 분석")
 uploaded_files = st.file_uploader("📂 DXF 도면들을 드래그 앤 드롭 하세요.", type=['dxf'], accept_multiple_files=True)
 
@@ -239,7 +223,6 @@ if uploaded_files:
                     finally:
                         os.remove(tmp_path)
                     
-                    # 💡 스팸 차단 방지: 마지막 파일이 아니면 3초 쉬었다가 다음 파일 진행!
                     if idx < len(uploaded_files) - 1:
                         time.sleep(3) 
             
@@ -248,30 +231,21 @@ if uploaded_files:
 
         st.success("✅ AI 도면 분석 및 기초 단가 계산이 완료되었습니다!")
 
-        # =========================================================================
-        # [핵심 추가 기능] 과거 견적 이력 조회 시스템
-        # =========================================================================
         if os.path.exists(DB_FILE) and not st.session_state.parsed_df.empty:
             try:
                 history_db = pd.read_csv(DB_FILE)
                 for idx, row in st.session_state.parsed_df.iterrows():
                     drw_no = str(row.get('도면번호', ''))
-                    
                     if not drw_no: continue
-                    
                     history_db['도면번호_str'] = history_db['도면번호'].astype(str)
                     matches = history_db[history_db['도면번호_str'] == drw_no]
-                    
                     if not matches.empty:
                         last_quote = matches.iloc[-1]
-                        st.warning(f"🕒 **과거 이력 발견!** [{drw_no}] 도면은 데이터베이스에 기존 견적 이력이 있습니다. \n"
+                        st.warning(f"🕒 **과거 이력 발견!** [{drw_no}] 도면은 기존 견적 이력이 있습니다. \n"
                                    f"👉 **이전 기록:** 가공비 {last_quote.get('가공비(수동입력)', 0):,}원 / 최종합계 {last_quote.get('최종합계', 0):,}원 (비고: {last_quote.get('비고', '없음')})")
-            except Exception as e:
+            except:
                 pass
 
-        # =========================================================================
-        # 3. Human-in-the-loop 검토 및 수정 
-        # =========================================================================
         if not st.session_state.parsed_df.empty:
             st.markdown("---")
             st.subheader("3. 📝 최종 견적 검토 및 데이터 수정")
@@ -290,9 +264,6 @@ if uploaded_files:
 
             st.markdown(f"### 💰 전체 프로젝트 총 견적액: **{final_df['최종합계'].sum():,} 원**")
 
-            # =========================================================================
-            # 4. 최종 데이터 저장 및 엑셀 발행
-            # =========================================================================
             st.markdown("---")
             st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
             
@@ -336,7 +307,5 @@ if uploaded_files:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                     
-                except FileNotFoundError:
-                    st.error("⚠️ 파이썬 파일이 있는 폴더에 '견적서.xlsx' 파일이 없습니다.")
                 except Exception as e:
-                    st.error(f"⚠️ 엑셀 템플릿을 생성하는 중 오류가 발생했습니다: {e}")
+                    st.error(f"⚠️ 엑셀 템플릿 처리 중 오류: {e}")
