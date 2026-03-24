@@ -258,17 +258,14 @@ if uploaded_files:
         old_file_names = st.session_state.uploaded_file_names
         
         if old_file_names != current_file_names:
-            # 💡 [핵심] 어떤 파일이 지워지고 어떤 파일이 들어왔는지 파악!
             added_files = [f for f in uploaded_files if f.name not in old_file_names]
             removed_file_names = [name for name in old_file_names if name not in current_file_names]
             
-            # 1. 파일이 삭제되었을 때 (AI 안 부르고 표에서만 삭 지움)
             if removed_file_names:
                 if not st.session_state.parsed_df.empty:
                     st.session_state.parsed_df = st.session_state.parsed_df[~st.session_state.parsed_df['도면번호'].isin(removed_file_names)]
                     st.toast("🗑️ 선택한 도면이 표에서 즉시 삭제되었습니다.")
             
-            # 2. 새로운 파일이 추가되었을 때 (새 파일만 AI 분석!)
             if added_files:
                 new_parsed_results = []
                 with st.spinner(f"📸 추가된 도면({len(added_files)}장)만 AI가 스마트하게 분석 중입니다..."):
@@ -322,18 +319,15 @@ if uploaded_files:
                             temp_df[c] = 0 if "비" in c else ""
                     temp_df = temp_df[col_order]
                     
-                    # 기존 데이터에 새로운 데이터 병합!
                     if st.session_state.parsed_df.empty:
                         st.session_state.parsed_df = temp_df
                     else:
                         st.session_state.parsed_df = pd.concat([st.session_state.parsed_df, temp_df], ignore_index=True)
                         
-            # 현재 상태 저장 및 즉시 새로고침
             st.session_state.uploaded_file_names = current_file_names
             st.rerun()
 
 else:
-    # 💡 모든 파일이 목록에서 지워졌을 때 표를 깔끔하게 리셋!
     if st.session_state.uploaded_file_names:
         st.session_state.uploaded_file_names = []
         st.session_state.parsed_df = pd.DataFrame()
@@ -367,6 +361,9 @@ if not st.session_state.parsed_df.empty:
     st.markdown("---")
     st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
     
+    # 💡 [핵심] 다운로드 전에 세션 스테이트(안전한 메모리 공간)에 저장할 데이터를 확실히 묶어둡니다!
+    st.session_state.final_df_to_save = final_df.copy()
+    
     excel_data = None
     try:
         wb = openpyxl.load_workbook("견적서.xlsx")
@@ -394,15 +391,27 @@ if not st.session_state.parsed_df.empty:
     except Exception as e: 
         st.error(f"⚠️ 엑셀 템플릿 처리 중 오류 (견적서.xlsx 파일 확인 필요): {e}")
 
+    # 💡 [핵심] 다운로드 버튼을 누르면 발동하는 강력한 구글 시트 저장 로직
     def save_to_db_on_download():
-        if gc:
+        if gc and 'final_df_to_save' in st.session_state:
             try:
-                ws_q = gc.open(SHEET_NAME).worksheet("Quote_Database")
+                sh = gc.open(SHEET_NAME)
+                
+                # 'Quote_Database' 탭이 없으면 파이썬이 알아서 새로 만듭니다!
+                try:
+                    ws_q = sh.worksheet("Quote_Database")
+                except:
+                    ws_q = sh.add_worksheet(title="Quote_Database", rows="1000", cols="30")
+                
+                df_to_save = st.session_state.final_df_to_save
                 data_q = ws_q.get_all_values()
+                
+                # 구버전/신버전 충돌 없이 안전하게 데이터를 아래에 꽂아 넣습니다.
                 if not data_q: 
-                    ws_q.update([final_df.columns.values.tolist()] + final_df.astype(str).values.tolist())
+                    ws_q.append_rows([df_to_save.columns.values.tolist()] + df_to_save.astype(str).values.tolist())
                 else: 
-                    ws_q.append_rows(final_df.astype(str).values.tolist())
+                    ws_q.append_rows(df_to_save.astype(str).values.tolist())
+                    
                 st.session_state.db_save_success = True
             except Exception as e: 
                 st.session_state.db_save_error = str(e)
@@ -416,9 +425,10 @@ if not st.session_state.parsed_df.empty:
             on_click=save_to_db_on_download
         )
         
+        # 저장이 무사히 끝나면 화면에 성공/실패 메시지를 띄워줍니다!
         if st.session_state.get('db_save_success'):
-            st.success("✅ 구글 시트 DB 누적 완료! 엑셀 파일이 다운로드되었습니다.")
+            st.success("✅ 구글 시트(Quote_Database)에 견적 데이터가 무사히 누적 저장되었습니다!")
             st.session_state.db_save_success = False 
         elif st.session_state.get('db_save_error'):
-            st.error(f"⚠️ 구글 시트 저장 실패: {st.session_state.db_save_error}")
+            st.error(f"⚠️ 구글 시트 저장 실패 (에러 메시지를 확인하세요): {st.session_state.db_save_error}")
             st.session_state.db_save_error = None
