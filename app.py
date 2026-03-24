@@ -181,6 +181,7 @@ def dxf_to_image(doc):
 def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_key):
     genai.configure(api_key=api_key)
     
+    # 💡 [핵심 방어막 공유] 동적 모델 자동 탐색 (Auto-Discovery)
     target_model_name = "gemini-1.5-flash"
     
     try:
@@ -194,13 +195,6 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
     try:
         model = genai.GenerativeModel(target_model_name)
         
-        prompt = f"""
-        당신은 대한민국 최고 수준의 2D 가공 도면(DXF) 해독 수석 엔지니어입니다.
-        제공된 **도면 이미지**와 추출된 **텍스트 데이터**를 조합하여 완벽한 견적 데이터를 산출하세요.
-
-        [도면 해독 핵심 지침]
-        1. **표제란(Title Block) 탐색:** 주로 우측 하단이나 상단에 위치한 표(Table)를 눈으로 먼저 찾으세요. DWG NO, TITLE, MAT'L(재질), Q'TY(수량)가 적혀있습니다.
-        2. **텍스트 매핑 교차검증 (중요):** 이미지 내 한글이나 폰트가 네모(ㅁㅁ)로 깨져 보일 수 있습니다. 이 때는 무조건 제공된 [추출된 텍스트]에서 해당 위치에 들어갈 법한 단어를 유추하여 짝을 맞추세요.
-        3. **규격(가로x세로x두께) 파악:** - 표제란의 SPEC이나 SIZE 칸에 "숫자X숫자X숫자" (예: 35X130X360) 패턴이 있다면 이를 우선시 하세요.
-           - 만약 표제란에 규격이 없다면, 도면 형상에 기입된 가장 긴 치수들을 파악하여 외형 최대 사이즈(가로, 세로, 두께)를 직접 추론하세요.
-        4. **가공 난이도 평가:** 제공된 [기하 정보] (구멍 개수, 공차, 치수 기입 개수)와 형상을 보고 "비고" 란에 가공 특이사항(예: 탭
+        # 💡 [수정] SyntaxError를 방지하기 위해 """ (트리플 쿼트)를 제거하고 안전한 문자열 묶음으로 변경
+        prompt = (
+            "당신은 대한민국 최고 수준의 2D 가공 도면(DXF) 해독 수석 엔지니어입니다.\n"
