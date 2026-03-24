@@ -69,7 +69,7 @@ def safe_float(value):
     except: return 0.0
 
 # =========================================================================
-# 💡 [핵심] 엑셀처럼 금액을 실시간으로 재계산해 주는 마법의 함수!
+# 💡 실시간 재계산 함수
 # =========================================================================
 def recalculate_costs(df, mat_db, post_db):
     for idx, row in df.iterrows():
@@ -106,7 +106,6 @@ def recalculate_costs(df, mat_db, post_db):
         else: 
             df.at[idx, "후처리비"] = 0
             
-        # 최종 금액 합산
         manual_cost = int(safe_float(row.get("가공비(수동입력)", 0)))
         df.at[idx, "가공비(수동입력)"] = manual_cost
         df.at[idx, "최종합계"] = df.at[idx, "소재비"] + df.at[idx, "후처리비"] + manual_cost
@@ -235,9 +234,7 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         response = model.generate_content(contents)
         result_text = response.text.strip()
         
-        # 💡 [핵심 방어 코드] 마크다운 복사/붙여넣기 에러를 원천 차단하는 로직
-        bt = chr(96) * 3  # 백틱 3개(```)를 문자로 직접 생성 (에디터 혼란 방지)
-        
+        bt = chr(96) * 3 
         if result_text.startswith(bt + "json"): 
             result_text = result_text[7:-3].strip()
         elif result_text.startswith(bt): 
@@ -248,137 +245,180 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         return {"도면번호": filename, "품명": "분석 실패", "재질": "미정", "수량": 1, "가로": 0, "세로": 0, "두께": 0, "후처리": "없음", "가공방법": "알수없음", "예상가공시간": "알수없음", "비고": f"AI 에러: {e}"}
 
 # =========================================================================
-# 2. DXF 업로드 및 실행 로직
+# 2. DXF 업로드 및 스마트 파일 처리 로직 (추가/삭제 감지)
 # =========================================================================
 st.subheader("2. DXF 도면 업로드 및 AI 비전 분석")
-uploaded_files = st.file_uploader("📂 DXF 도면을 올려주세요. AI가 분석합니다.", type=['dxf'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("📂 DXF 도면을 올려주세요.", type=['dxf'], accept_multiple_files=True)
 
 if uploaded_files:
     if not api_key:
         st.warning("👈 왼쪽 사이드바에 Gemini API Key를 먼저 입력해 주세요!")
     else:
         current_file_names = [f.name for f in uploaded_files]
-        if st.session_state.uploaded_file_names != current_file_names:
-            parsed_results = []
-            with st.spinner("📸 AI가 도면을 분석 중입니다... (1장당 5~10초 소요)"):
-                for idx, file in enumerate(uploaded_files):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
-                        tmp_file.write(file.getvalue())
-                        tmp_path = tmp_file.name
-                    
-                    try:
-                        doc = ezdxf.readfile(tmp_path)
-                        msp = doc.modelspace()
+        old_file_names = st.session_state.uploaded_file_names
+        
+        if old_file_names != current_file_names:
+            # 💡 [핵심] 어떤 파일이 지워지고 어떤 파일이 들어왔는지 파악!
+            added_files = [f for f in uploaded_files if f.name not in old_file_names]
+            removed_file_names = [name for name in old_file_names if name not in current_file_names]
+            
+            # 1. 파일이 삭제되었을 때 (AI 안 부르고 표에서만 삭 지움)
+            if removed_file_names:
+                if not st.session_state.parsed_df.empty:
+                    st.session_state.parsed_df = st.session_state.parsed_df[~st.session_state.parsed_df['도면번호'].isin(removed_file_names)]
+                    st.toast("🗑️ 선택한 도면이 표에서 즉시 삭제되었습니다.")
+            
+            # 2. 새로운 파일이 추가되었을 때 (새 파일만 AI 분석!)
+            if added_files:
+                new_parsed_results = []
+                with st.spinner(f"📸 추가된 도면({len(added_files)}장)만 AI가 스마트하게 분석 중입니다..."):
+                    for idx, file in enumerate(added_files):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
+                            tmp_file.write(file.getvalue())
+                            tmp_path = tmp_file.name
                         
-                        extracted_texts = [e.dxf.text for e in msp.query('TEXT MTEXT') if hasattr(e.dxf, 'text') and e.dxf.text]
-                        clean_texts = " | ".join([t.strip() for t in extracted_texts if t.strip()])
+                        try:
+                            doc = ezdxf.readfile(tmp_path)
+                            msp = doc.modelspace()
+                            
+                            extracted_texts = [e.dxf.text for e in msp.query('TEXT MTEXT') if hasattr(e.dxf, 'text') and e.dxf.text]
+                            clean_texts = " | ".join([t.strip() for t in extracted_texts if t.strip()])
+                            
+                            num_tols = sum(1 for t in extracted_texts if any(k in t for k in ['±', '%%p', '+', '-', 'H7', 'h7']))
+                            num_holes = len(msp.query('CIRCLE'))
+                            num_dims = len(msp.query('DIMENSION'))
+                            geometry_info = f"원 갯수: {num_holes}개, 치수 갯수: {num_dims}개, 공차: {num_tols}건"
+                            
+                            img_obj = dxf_to_image(doc)
+                            ai_result = analyze_with_hybrid_gemini(file.name, clean_texts, geometry_info, img_obj, api_key)
+                            
+                            ai_result["가로"] = safe_float(ai_result.get("가로", 0))
+                            ai_result["세로"] = safe_float(ai_result.get("세로", 0))
+                            ai_result["두께"] = safe_float(ai_result.get("두께", 0))
+                            qty = ai_result.get("수량", 1)
+                            ai_result["수량"] = qty if isinstance(qty, int) else 1
+                            ai_result["가공비(수동입력)"] = 0
+                            
+                            new_parsed_results.append(ai_result)
                         
-                        num_tols = sum(1 for t in extracted_texts if any(k in t for k in ['±', '%%p', '+', '-', 'H7', 'h7']))
-                        num_holes = len(msp.query('CIRCLE'))
-                        num_dims = len(msp.query('DIMENSION'))
-                        geometry_info = f"원(구멍) 갯수: {num_holes}개, 치수기입 갯수: {num_dims}개, 공차추정: {num_tols}건"
-                        
-                        img_obj = dxf_to_image(doc)
-                        ai_result = analyze_with_hybrid_gemini(file.name, clean_texts, geometry_info, img_obj, api_key)
-                        
-                        ai_result["가로"] = safe_float(ai_result.get("가로", 0))
-                        ai_result["세로"] = safe_float(ai_result.get("세로", 0))
-                        ai_result["두께"] = safe_float(ai_result.get("두께", 0))
-                        qty = ai_result.get("수량", 1)
-                        ai_result["수량"] = qty if isinstance(qty, int) else 1
-                        ai_result["가공비(수동입력)"] = 0
-                        
-                        parsed_results.append(ai_result)
-                    
-                    except Exception as e: 
-                        st.error(f"{file.name} 처리 중 오류: {e}")
-                    finally: 
-                        os.remove(tmp_path)
-                        
-                    if idx < len(uploaded_files) - 1: 
-                        time.sleep(3) 
-            
-            # 임시로 표를 만든 뒤, 재계산 함수를 돌리고 컬럼 순서를 강제로 맞춥니다.
-            temp_df = pd.DataFrame(parsed_results)
-            temp_df = recalculate_costs(temp_df, st.session_state.material_db, st.session_state.post_db)
-            
-            # 표 순서 재배치 (금액 앞, 비고/가공방법 뒤)
-            col_order = ["도면번호", "품명", "재질", "수량", "가로", "세로", "두께", "후처리", 
-                         "소재비", "후처리비", "가공비(수동입력)", "최종합계", 
-                         "가공방법", "예상가공시간", "비고"]
-            
-            for c in col_order:
-                if c not in temp_df.columns:
-                    temp_df[c] = 0 if "비" in c else ""
-                    
-            st.session_state.parsed_df = temp_df[col_order]
-            st.session_state.uploaded_file_names = current_file_names
-
-        st.success("✅ 가공 방법 및 예상 소요 시간 분석이 완료되었습니다!")
-
-        if not st.session_state.parsed_df.empty:
-            st.markdown("---")
-            st.subheader("3. 📝 최종 견적 검토 및 데이터 수정 (실시간 자동 계산)")
-            st.info("💡 '가로/세로/두께' 또는 '재질'을 표 안에서 직접 수정해 보세요! **소재비와 최종합계가 자동으로 즉시 재계산됩니다!**")
-            
-            # 표 렌더링 (금액 칸은 자동 계산되므로 잠금 처리)
-            edited_df = st.data_editor(
-                st.session_state.parsed_df, 
-                disabled=["소재비", "후처리비", "최종합계", "가공방법", "예상가공시간"], 
-                hide_index=True, 
-                use_container_width=True, 
-                key="quote_editor"
-            )
-            
-            # 사용자가 무언가 표를 수정했다면 비용을 다시 계산합니다
-            final_df = recalculate_costs(edited_df.copy(), st.session_state.material_db, st.session_state.post_db)
-            
-            # 다시 계산한 결과가 이전 화면과 다르면(업데이트가 필요하면) 화면 새로고침!
-            if not final_df.equals(st.session_state.parsed_df):
-                st.session_state.parsed_df = final_df
-                st.rerun() 
-            
-            total_sum = sum(final_df["최종합계"] * final_df["수량"])
-            st.markdown(f"### 💰 전체 프로젝트 총 견적액 (수량 반영): **{total_sum:,} 원**")
-
-            st.markdown("---")
-            st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
-            
-            if st.button("🚀 견적 확정 및 엑셀 폼 발행하기"):
-                if gc:
-                    try:
-                        ws_q = gc.open(SHEET_NAME).worksheet("Quote_Database")
-                        data_q = ws_q.get_all_values()
-                        if not data_q: 
-                            ws_q.update([final_df.columns.values.tolist()] + final_df.astype(str).values.tolist())
-                        else: 
-                            ws_q.append_rows(final_df.astype(str).values.tolist())
-                        st.success(f"✅ 구글 시트 DB 누적 완료!")
-                    except Exception as e: 
-                        st.error(f"⚠️ 저장 실패: {e}")
+                        except Exception as e: 
+                            st.error(f"{file.name} 처리 중 오류: {e}")
+                        finally: 
+                            os.remove(tmp_path)
+                            
+                        if idx < len(added_files) - 1: 
+                            time.sleep(3) 
                 
-                try:
-                    wb = openpyxl.load_workbook("견적서.xlsx")
-                    ws = wb["견적서(을지)"] if "견적서(을지)" in wb.sheetnames else wb.active
-                    start_row = 7
-                    for index, row in final_df.iterrows():
-                        current_row = start_row + index
-                        qty = int(row['수량'])
-                        ws.cell(row=current_row, column=1).value = index + 1
-                        ws.cell(row=current_row, column=2).value = row['도면번호']
-                        ws.cell(row=current_row, column=3).value = row['품명']
-                        ws.cell(row=current_row, column=4).value = f"{row['가로']} x {row['세로']} x {row['두께']}"
-                        ws.cell(row=current_row, column=6).value = row['후처리']
-                        ws.cell(row=current_row, column=7).value = qty
-                        ws.cell(row=current_row, column=8).value = int(row['소재비']) * qty
-                        ws.cell(row=current_row, column=9).value = int(row['가공비(수동입력)']) * qty
-                        ws.cell(row=current_row, column=10).value = int(row['후처리비']) * qty
+                if new_parsed_results:
+                    temp_df = pd.DataFrame(new_parsed_results)
+                    temp_df = recalculate_costs(temp_df, st.session_state.material_db, st.session_state.post_db)
+                    
+                    col_order = ["도면번호", "품명", "재질", "수량", "가로", "세로", "두께", "후처리", 
+                                 "소재비", "후처리비", "가공비(수동입력)", "최종합계", 
+                                 "가공방법", "예상가공시간", "비고"]
+                    
+                    for c in col_order:
+                        if c not in temp_df.columns:
+                            temp_df[c] = 0 if "비" in c else ""
+                    temp_df = temp_df[col_order]
+                    
+                    # 기존 데이터에 새로운 데이터 병합!
+                    if st.session_state.parsed_df.empty:
+                        st.session_state.parsed_df = temp_df
+                    else:
+                        st.session_state.parsed_df = pd.concat([st.session_state.parsed_df, temp_df], ignore_index=True)
                         
-                        combined_remarks = f"[{row['가공방법']} / {row['예상가공시간']}] {row['비고']}"
-                        ws.cell(row=current_row, column=16).value = combined_remarks
-                        
-                    output = BytesIO()
-                    wb.save(output)
-                    st.download_button(label="📊 회사 양식 최종 엑셀 다운로드 (.xlsx)", data=output.getvalue(), file_name="최종견적서_발행.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except Exception as e: 
-                    st.error(f"⚠️ 엑셀 템플릿 처리 중 오류: {e}")
+            # 현재 상태 저장 및 즉시 새로고침
+            st.session_state.uploaded_file_names = current_file_names
+            st.rerun()
+
+else:
+    # 💡 모든 파일이 목록에서 지워졌을 때 표를 깔끔하게 리셋!
+    if st.session_state.uploaded_file_names:
+        st.session_state.uploaded_file_names = []
+        st.session_state.parsed_df = pd.DataFrame()
+        st.rerun()
+
+# =========================================================================
+# 3. 데이터 검토 및 엑셀 다운로드 
+# =========================================================================
+if not st.session_state.parsed_df.empty:
+    st.markdown("---")
+    st.subheader("3. 📝 최종 견적 검토 및 데이터 수정 (실시간 자동 계산)")
+    st.info("💡 '가로/세로/두께' 또는 '재질'을 직접 수정해 보세요! **소재비와 최종합계가 즉시 재계산됩니다!**")
+    
+    edited_df = st.data_editor(
+        st.session_state.parsed_df, 
+        disabled=["소재비", "후처리비", "최종합계", "가공방법", "예상가공시간"], 
+        hide_index=True, 
+        use_container_width=True, 
+        key="quote_editor"
+    )
+    
+    final_df = recalculate_costs(edited_df.copy(), st.session_state.material_db, st.session_state.post_db)
+    
+    if not final_df.equals(st.session_state.parsed_df):
+        st.session_state.parsed_df = final_df
+        st.rerun() 
+    
+    total_sum = sum(final_df["최종합계"] * final_df["수량"])
+    st.markdown(f"### 💰 전체 프로젝트 총 견적액 (수량 반영): **{total_sum:,} 원**")
+
+    st.markdown("---")
+    st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
+    
+    excel_data = None
+    try:
+        wb = openpyxl.load_workbook("견적서.xlsx")
+        ws = wb["견적서(을지)"] if "견적서(을지)" in wb.sheetnames else wb.active
+        start_row = 7
+        for index, row in final_df.iterrows():
+            current_row = start_row + index
+            qty = int(row['수량'])
+            ws.cell(row=current_row, column=1).value = index + 1
+            ws.cell(row=current_row, column=2).value = row['도면번호']
+            ws.cell(row=current_row, column=3).value = row['품명']
+            ws.cell(row=current_row, column=4).value = f"{row['가로']} x {row['세로']} x {row['두께']}"
+            ws.cell(row=current_row, column=6).value = row['후처리']
+            ws.cell(row=current_row, column=7).value = qty
+            ws.cell(row=current_row, column=8).value = int(row['소재비']) * qty
+            ws.cell(row=current_row, column=9).value = int(row['가공비(수동입력)']) * qty
+            ws.cell(row=current_row, column=10).value = int(row['후처리비']) * qty
+            
+            combined_remarks = f"[{row['가공방법']} / {row['예상가공시간']}] {row['비고']}"
+            ws.cell(row=current_row, column=16).value = combined_remarks
+            
+        output = BytesIO()
+        wb.save(output)
+        excel_data = output.getvalue()
+    except Exception as e: 
+        st.error(f"⚠️ 엑셀 템플릿 처리 중 오류 (견적서.xlsx 파일 확인 필요): {e}")
+
+    def save_to_db_on_download():
+        if gc:
+            try:
+                ws_q = gc.open(SHEET_NAME).worksheet("Quote_Database")
+                data_q = ws_q.get_all_values()
+                if not data_q: 
+                    ws_q.update([final_df.columns.values.tolist()] + final_df.astype(str).values.tolist())
+                else: 
+                    ws_q.append_rows(final_df.astype(str).values.tolist())
+                st.session_state.db_save_success = True
+            except Exception as e: 
+                st.session_state.db_save_error = str(e)
+
+    if excel_data:
+        st.download_button(
+            label="🚀 견적 확정 및 엑셀 폼 발행하기 (.xlsx)",
+            data=excel_data,
+            file_name="최종견적서_발행.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            on_click=save_to_db_on_download
+        )
+        
+        if st.session_state.get('db_save_success'):
+            st.success("✅ 구글 시트 DB 누적 완료! 엑셀 파일이 다운로드되었습니다.")
+            st.session_state.db_save_success = False 
+        elif st.session_state.get('db_save_error'):
+            st.error(f"⚠️ 구글 시트 저장 실패: {st.session_state.db_save_error}")
+            st.session_state.db_save_error = None
