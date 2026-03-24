@@ -76,10 +76,10 @@ def recalculate_costs(df, mat_db, post_db):
         w = safe_float(row.get("가로", 0))
         h = safe_float(row.get("세로", 0))
         t = safe_float(row.get("두께", 0))
-        mat_name = str(row.get("재질", "미정"))
-        post_name = str(row.get("후처리", "없음"))
+        mat_name = str(row.get("재질", "미정")).strip()
+        post_name = str(row.get("후처리", "없음")).strip()
         
-        # 재질 매핑
+        # 재질 매핑 (AI가 이미 잘 맞춰주겠지만, 혹시 모를 오차를 위해 이중 확인)
         mat_info = pd.DataFrame()
         if mat_name and mat_name != "미정":
             mask = mat_db['재질'].astype(str).str.lower().str.contains(mat_name.lower(), na=False)
@@ -87,7 +87,7 @@ def recalculate_costs(df, mat_db, post_db):
             if not matches.empty: 
                 mat_info = matches.iloc[[0]]
             else: 
-                mat_info = mat_db[mat_db['재질'] == mat_name]
+                mat_info = mat_db[mat_db['재질'].astype(str).str.strip() == mat_name]
 
         weight = 0
         if not mat_info.empty:
@@ -99,7 +99,7 @@ def recalculate_costs(df, mat_db, post_db):
             df.at[idx, "소재비"] = 0
         
         # 후처리 매핑
-        post_info = post_db[post_db['표면처리'] == post_name]
+        post_info = post_db[post_db['표면처리'].astype(str).str.strip() == post_name]
         if not post_info.empty:
             post_price_per_kg = safe_float(post_info['KG당 단가'].values[0])
             df.at[idx, "후처리비"] = int(weight * post_price_per_kg)
@@ -183,7 +183,8 @@ def dxf_to_image(doc):
     except Exception as e:
         return None
 
-def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_key):
+# 💡 [핵심 강화] DB 목록을 AI에게 전달하는 매개변수 추가
+def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_key, available_materials, available_posts):
     genai.configure(api_key=api_key)
     target_model_name = "gemini-1.5-flash"
     
@@ -201,9 +202,18 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         당신은 기계 가공 도면 해독 및 견적 산출 전문가입니다.
         제공된 **도면 캡처 이미지**와 **추출된 텍스트 데이터**를 종합하여 아래 임무를 완수하세요.
 
+        [우리 회사 DB 보유 목록]
+        - 보유 재질: {available_materials}
+        - 보유 후처리: {available_posts}
+
+        [도면 해독 지침]
         1. 시각적 유추: 도면 형상을 보고 어떤 가공이 주를 이루는지 파악하세요 (밀링, 선반, 레이저, 판금, 용접 중 택).
         2. 시간 추론: 형상의 복잡도를 파악하여 '예상 가공 시간'을 추론하세요.
-        3. 표제란을 우선 탐색하여 재질, 규격(숫자X숫자X숫자 패턴), 수량을 매핑하세요.
+        3. [매우 중요] 재질 및 후처리 매핑:
+           - 도면에 적힌 재질/후처리가 [우리 회사 DB 보유 목록]에 있는 항목의 동의어거나 같은 종류라면(예: 'MC흑색'->'MC 나이론'), 반드시 **DB에 등록된 정확한 명칭**으로 통일해서 적으세요.
+           - 단, DB 목록에 전혀 없는 새로운 재질이거나 확신할 수 없다면, 억지로 DB 목록에 맞추지 말고 **도면에 적힌 원본 글자 그대로** 적으세요.
+        4. 표제란을 우선 탐색하여 규격(숫자X숫자X숫자 패턴)과 수량을 매핑하세요.
+        5. '비고' 란을 구체적으로 작성하세요. [추출된 기하 정보]를 바탕으로 홀/치수/공차 개수를 명시하고, 형상을 바탕으로 가공 특이사항과 주의할 점을 꼼꼼히 적으세요.
 
         [추출된 기하 정보]
         {geometry_info}
@@ -215,7 +225,7 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         {{
             "도면번호": "문자열 (DWG.NO)",
             "품명": "문자열 (TITLE)",
-            "재질": "문자열 (예: MC, SUS304 등)",
+            "재질": "문자열 (DB명칭 변환 혹은 도면 원본)",
             "수량": 정수,
             "가로": 숫자,
             "세로": 숫자,
@@ -223,7 +233,7 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
             "후처리": "문자열",
             "가공방법": "문자열",
             "예상가공시간": "문자열",
-            "비고": "문자열"
+            "비고": "문자열 (예시: '▶특이사항: 탭 가공 및 깊은 포켓 존재 ▶주의사항: H7 끼워맞춤 공차 주의 ▶분석정보: 홀 5개, 공차 2건, 치수 15개')"
         }}
         """
         
@@ -245,7 +255,7 @@ def analyze_with_hybrid_gemini(filename, text_data, geometry_info, img_obj, api_
         return {"도면번호": filename, "품명": "분석 실패", "재질": "미정", "수량": 1, "가로": 0, "세로": 0, "두께": 0, "후처리": "없음", "가공방법": "알수없음", "예상가공시간": "알수없음", "비고": f"AI 에러: {e}"}
 
 # =========================================================================
-# 2. DXF 업로드 및 스마트 파일 처리 로직 (추가/삭제 감지)
+# 2. DXF 업로드 및 스마트 파일 처리 로직
 # =========================================================================
 st.subheader("2. DXF 도면 업로드 및 AI 비전 분석")
 uploaded_files = st.file_uploader("📂 DXF 도면을 올려주세요.", type=['dxf'], accept_multiple_files=True)
@@ -268,7 +278,11 @@ if uploaded_files:
             
             if added_files:
                 new_parsed_results = []
-                with st.spinner(f"📸 추가된 도면({len(added_files)}장)만 AI가 스마트하게 분석 중입니다..."):
+                # 💡 [핵심] 현재 DB에 있는 재질/후처리 목록을 문자열로 예쁘게 뽑아서 AI에게 넘길 준비를 합니다.
+                db_materials_str = ", ".join(st.session_state.material_db['재질'].astype(str).tolist())
+                db_posts_str = ", ".join(st.session_state.post_db['표면처리'].astype(str).tolist())
+
+                with st.spinner(f"📸 추가된 도면({len(added_files)}장)만 AI가 꼼꼼하게 분석 중입니다..."):
                     for idx, file in enumerate(added_files):
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
                             tmp_file.write(file.getvalue())
@@ -287,7 +301,8 @@ if uploaded_files:
                             geometry_info = f"원 갯수: {num_holes}개, 치수 갯수: {num_dims}개, 공차: {num_tols}건"
                             
                             img_obj = dxf_to_image(doc)
-                            ai_result = analyze_with_hybrid_gemini(file.name, clean_texts, geometry_info, img_obj, api_key)
+                            # 💡 함수 호출 시 DB 메뉴판 2개(재질, 후처리)를 같이 던져줍니다!
+                            ai_result = analyze_with_hybrid_gemini(file.name, clean_texts, geometry_info, img_obj, api_key, db_materials_str, db_posts_str)
                             
                             ai_result["가로"] = safe_float(ai_result.get("가로", 0))
                             ai_result["세로"] = safe_float(ai_result.get("세로", 0))
@@ -361,7 +376,6 @@ if not st.session_state.parsed_df.empty:
     st.markdown("---")
     st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
     
-    # 💡 [핵심] 다운로드 전에 세션 스테이트(안전한 메모리 공간)에 저장할 데이터를 확실히 묶어둡니다!
     st.session_state.final_df_to_save = final_df.copy()
     
     excel_data = None
@@ -382,7 +396,7 @@ if not st.session_state.parsed_df.empty:
             ws.cell(row=current_row, column=9).value = int(row['가공비(수동입력)']) * qty
             ws.cell(row=current_row, column=10).value = int(row['후처리비']) * qty
             
-            combined_remarks = f"[{row['가공방법']} / {row['예상가공시간']}] {row['비고']}"
+            combined_remarks = f"[{row['가공방법']} / {row['예상가공시간']}]\n{row['비고']}"
             ws.cell(row=current_row, column=16).value = combined_remarks
             
         output = BytesIO()
@@ -391,13 +405,10 @@ if not st.session_state.parsed_df.empty:
     except Exception as e: 
         st.error(f"⚠️ 엑셀 템플릿 처리 중 오류 (견적서.xlsx 파일 확인 필요): {e}")
 
-    # 💡 [핵심] 다운로드 버튼을 누르면 발동하는 강력한 구글 시트 저장 로직
     def save_to_db_on_download():
         if gc and 'final_df_to_save' in st.session_state:
             try:
                 sh = gc.open(SHEET_NAME)
-                
-                # 'Quote_Database' 탭이 없으면 파이썬이 알아서 새로 만듭니다!
                 try:
                     ws_q = sh.worksheet("Quote_Database")
                 except:
@@ -406,7 +417,6 @@ if not st.session_state.parsed_df.empty:
                 df_to_save = st.session_state.final_df_to_save
                 data_q = ws_q.get_all_values()
                 
-                # 구버전/신버전 충돌 없이 안전하게 데이터를 아래에 꽂아 넣습니다.
                 if not data_q: 
                     ws_q.append_rows([df_to_save.columns.values.tolist()] + df_to_save.astype(str).values.tolist())
                 else: 
@@ -425,7 +435,6 @@ if not st.session_state.parsed_df.empty:
             on_click=save_to_db_on_download
         )
         
-        # 저장이 무사히 끝나면 화면에 성공/실패 메시지를 띄워줍니다!
         if st.session_state.get('db_save_success'):
             st.success("✅ 구글 시트(Quote_Database)에 견적 데이터가 무사히 누적 저장되었습니다!")
             st.session_state.db_save_success = False 
