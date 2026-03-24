@@ -89,29 +89,35 @@ with st.expander("📊 1. 기준 단가표 관리 (클릭하여 펼치기)"):
         edited_post.to_csv(POST_FILE, index=False, encoding='utf-8-sig')
         st.session_state.material_db = edited_material
         st.session_state.post_db = edited_post
-        st.success("✅ 단가표가 컴퓨터에 안전하게 저장되었습니다.")
+        st.success("✅ 단가표가 저장되었습니다.")
 
 st.markdown("---")
 
 def analyze_with_gemini(filename, text_data, geometry_info, api_key):
     genai.configure(api_key=api_key)
     
-    # 💡 [핵심 방어막] 클라우드 서버에서 에러가 나지 않도록 가장 안정적인 모델을 기본값으로 강제 지정합니다!
-    target_model_name = "gemini-pro" 
+    # 💡 [초강력 방어막] 현재 쓸 수 있는 최신 AI(예: gemini-2.5-flash 등)를 서버에 직접 물어보고 스스로 선택합니다!
+    target_model_name = ""
     try:
         available_models = genai.list_models()
         for m in available_models:
             if 'generateContent' in m.supported_generation_methods:
-                if 'gemini' in m.name.lower() and 'flash' in m.name.lower():
+                if 'gemini' in m.name.lower():
                     target_model_name = m.name
-                    break
-    except:
-        pass
+                    # flash 모델을 찾으면 가장 우선적으로 선택 (제일 빠르고 저렴함)
+                    if 'flash' in m.name.lower():
+                        break
+    except Exception as e:
+        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 모델 탐색 에러: {e}"}
+    
+    # 만약 위에서 못 찾았다면 최후의 보루로 강제 지정
+    if not target_model_name:
+        target_model_name = "gemini-1.5-flash"
         
     model = genai.GenerativeModel(target_model_name)
     
     prompt = f"""
-    너는 한국의 2D 가공 도면(DXF) 견적 전문가야. 미래의 딥러닝 AI 학습 데이터를 구축하는 중이야.
+    너는 한국의 2D 가공 도면(DXF) 견적 전문가야.
     아래는 '{filename}' 도면 파일에서 추출한 형상 정보(구멍/치수 개수)와 텍스트들이야.
     
     [기하학적 형상 정보]
@@ -121,8 +127,8 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
     {text_data}
     [추출된 텍스트 끝]
     
-    이 정보를 종합해서 아래 JSON 형식으로만 완벽하게 대답해줘.
-    특히 '비고'란에는 도면 주서뿐만 아니라 전달받은 [형상 정보]를 포함하여 가공 난이도를 유추할 수 있도록 자세히 기록해줘.
+    이 정보를 종합해서 아래 JSON 형식으로만 완벽하게 대답해줘. 다른 말은 하지마.
+    '비고'란에는 도면 주서뿐만 아니라 전달받은 [형상 정보]를 포함하여 가공 난이도를 유추할 수 있도록 자세히 기록해줘.
     
     {{
         "도면번호": "문자열 (도면명)",
@@ -133,7 +139,7 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
         "세로": 숫자,
         "두께": 숫자,
         "후처리": "문자열 (없으면 '없음')",
-        "비고": "가공 특징(구멍, 치수, 공차 등) 및 특이사항 요약"
+        "비고": "가공 특징 및 특이사항 요약"
     }}
     """
     
@@ -150,7 +156,7 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
         return parsed_data
         
     except Exception as e:
-        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 에러: {e}"}
+        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"내용 생성 에러: {e}"}
 
 st.subheader("2. DXF 도면 업로드 및 AI 분석")
 uploaded_files = st.file_uploader("📂 DXF 도면들을 드래그 앤 드롭 하세요.", type=['dxf'], accept_multiple_files=True)
