@@ -9,11 +9,36 @@ import json
 import re
 import time
 import google.generativeai as genai
+import gspread # 💡 구글 시트 조종 도구 장착!
 
 st.set_page_config(page_title="2D DXF 자동 견적 시스템", page_icon="⚙️", layout="wide")
 
-API_KEY_FILE = "api_key.txt"
+# =========================================================================
+# 💡 구글 시트(DB) 연결 로직
+# =========================================================================
+SHEET_NAME = "견적프로그램_DB"
 
+@st.cache_resource
+def init_gspread():
+    if "google_credentials" in st.secrets:
+        try:
+            # 금고(Secrets)에서 출입증을 꺼내서 구글 시트에 로그인합니다.
+            cred_dict = json.loads(st.secrets["google_credentials"], strict=False)
+            gc = gspread.service_account_from_dict(cred_dict)
+            return gc
+        except Exception as e:
+            st.error(f"⚠️ 구글 시트 인증 에러 (JSON 출입증을 확인하세요): {e}")
+            return None
+    else:
+        st.error("⚠️ 스트림릿 금고(Secrets)에 google_credentials 암호가 없습니다.")
+        return None
+
+gc = init_gspread()
+
+# =========================================================================
+# 🔑 API 키 자동 저장/불러오기 로직
+# =========================================================================
+API_KEY_FILE = "api_key.txt"
 def load_api_key():
     if os.path.exists(API_KEY_FILE):
         with open(API_KEY_FILE, "r") as f:
@@ -31,7 +56,7 @@ api_key = st.sidebar.text_input("Gemini API Key를 입력하세요", value=saved
 if st.sidebar.button("💾 API 키 저장하기"):
     if api_key:
         save_api_key(api_key)
-        st.sidebar.success("✅ 키가 저장되었습니다! 다음부터 자동 입력됩니다.")
+        st.sidebar.success("✅ 키가 컴퓨터에 저장되었습니다!")
     else:
         st.sidebar.error("키를 입력한 후 저장해주세요.")
 
@@ -47,30 +72,53 @@ def safe_float(value):
     except:
         return 0.0
 
-MATERIAL_FILE = "material_db.csv"
-POST_FILE = "post_db.csv"
-DB_FILE = "Quote_Database.csv"
+# =========================================================================
+# 1. 기준 단가표 관리 (구글 시트 연동)
+# =========================================================================
+default_material_db = pd.DataFrame({
+    '재질': ['SS400', 'S45C', 'SPCC(레이져)', 'SM45C', 'AL2017', 'AL5052고베판', 'AL6061판재', 'AL7075', 'SUS304', 'BS(신주)', 'MC 나이론', '아세탈', '테프론', 'PC (국산)', 'PUR.'],
+    'KG당 단가': [2400, 2400, 1500, 2400, 25000, 9300, 8000, 11500, 7650, 10000, 12000, 15000, 40000, 10000, 15000],
+    '비중': [8.0, 8.0, 8.0, 8.0, 2.8, 2.8, 2.8, 2.8, 8.0, 8.0, 1.6, 1.41, 2.2, 1.2, 1.5]
+})
 
+default_post_db = pd.DataFrame({
+    '표면처리': ['W-Anodizing', 'B-Anodizing', 'H-Anodizing', 'SOFT ANODIZING', '무전해니켈(ST)', '무전해니켈(AL)', '크롬도금', '전해연마', '아연도금', '흑색경질', 'POLISHING', 'PAINT'],
+    'KG당 단가': [1500, 2500, 6000, 3000, 2500, 6000, 1500, 1500, 800, 7000, 2500, 600]
+})
+
+# 구글 시트에서 재질 단가표 불러오기
 if 'material_db' not in st.session_state:
-    if os.path.exists(MATERIAL_FILE):
-        st.session_state.material_db = pd.read_csv(MATERIAL_FILE)
+    if gc:
+        try:
+            sh = gc.open(SHEET_NAME)
+            ws_m = sh.worksheet("material_db")
+            data_m = ws_m.get_all_records()
+            if data_m:
+                st.session_state.material_db = pd.DataFrame(data_m)
+            else:
+                ws_m.update([default_material_db.columns.values.tolist()] + default_material_db.astype(str).values.tolist())
+                st.session_state.material_db = default_material_db
+        except Exception as e:
+            st.session_state.material_db = default_material_db
     else:
-        st.session_state.material_db = pd.DataFrame({
-            '재질': ['SS400', 'S45C', 'SPCC(레이져)', 'SM45C', 'AL2017', 'AL5052고베판', 'AL6061판재', 'AL7075', 'SUS304', 'BS(신주)', 'MC 나이론', '아세탈', '테프론', 'PC (국산)', 'PUR.'],
-            'KG당 단가': [2400, 2400, 1500, 2400, 25000, 9300, 8000, 11500, 7650, 10000, 12000, 15000, 40000, 10000, 15000],
-            '비중': [8.0, 8.0, 8.0, 8.0, 2.8, 2.8, 2.8, 2.8, 8.0, 8.0, 1.6, 1.41, 2.2, 1.2, 1.5]
-        })
-        st.session_state.material_db.to_csv(MATERIAL_FILE, index=False, encoding='utf-8-sig')
+        st.session_state.material_db = default_material_db
 
+# 구글 시트에서 후처리 단가표 불러오기
 if 'post_db' not in st.session_state:
-    if os.path.exists(POST_FILE):
-        st.session_state.post_db = pd.read_csv(POST_FILE)
+    if gc:
+        try:
+            sh = gc.open(SHEET_NAME)
+            ws_p = sh.worksheet("post_db")
+            data_p = ws_p.get_all_records()
+            if data_p:
+                st.session_state.post_db = pd.DataFrame(data_p)
+            else:
+                ws_p.update([default_post_db.columns.values.tolist()] + default_post_db.astype(str).values.tolist())
+                st.session_state.post_db = default_post_db
+        except Exception as e:
+            st.session_state.post_db = default_post_db
     else:
-        st.session_state.post_db = pd.DataFrame({
-            '표면처리': ['W-Anodizing', 'B-Anodizing', 'H-Anodizing', 'SOFT ANODIZING', '무전해니켈(ST)', '무전해니켈(AL)', '크롬도금', '전해연마', '아연도금', '흑색경질', 'POLISHING', 'PAINT'],
-            'KG당 단가': [1500, 2500, 6000, 3000, 2500, 6000, 1500, 1500, 800, 7000, 2500, 600]
-        })
-        st.session_state.post_db.to_csv(POST_FILE, index=False, encoding='utf-8-sig')
+        st.session_state.post_db = default_post_db
 
 if 'parsed_df' not in st.session_state:
     st.session_state.parsed_df = pd.DataFrame()
@@ -84,18 +132,33 @@ with st.expander("📊 1. 기준 단가표 관리 (클릭하여 펼치기)"):
     with col2:
         edited_post = st.data_editor(st.session_state.post_db, num_rows="dynamic", use_container_width=True)
     
-    if st.button("💾 변경된 단가표 영구 저장하기"):
-        edited_material.to_csv(MATERIAL_FILE, index=False, encoding='utf-8-sig')
-        edited_post.to_csv(POST_FILE, index=False, encoding='utf-8-sig')
+    if st.button("💾 변경된 단가표 영구 저장하기 (구글 시트 연동)"):
         st.session_state.material_db = edited_material
         st.session_state.post_db = edited_post
-        st.success("✅ 단가표가 저장되었습니다.")
+        if gc:
+            try:
+                sh = gc.open(SHEET_NAME)
+                ws_m = sh.worksheet("material_db")
+                ws_m.clear()
+                ws_m.update([edited_material.columns.values.tolist()] + edited_material.astype(str).values.tolist())
+                
+                ws_p = sh.worksheet("post_db")
+                ws_p.clear()
+                ws_p.update([edited_post.columns.values.tolist()] + edited_post.astype(str).values.tolist())
+                
+                st.success("✅ 구글 스프레드시트에 단가표가 완벽하게 동기화(저장)되었습니다!")
+            except Exception as e:
+                st.error(f"⚠️ 구글 시트 저장 실패: {e}")
+        else:
+            st.warning("⚠️ 구글 시트와 연결되지 않아 임시 저장만 되었습니다.")
 
 st.markdown("---")
 
+# =========================================================================
+# 2. DXF 업로드 및 AI 분석
+# =========================================================================
 def analyze_with_gemini(filename, text_data, geometry_info, api_key):
     genai.configure(api_key=api_key)
-    
     target_model_name = ""
     try:
         available_models = genai.list_models()
@@ -106,9 +169,8 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
                     if 'flash' in m.name.lower():
                         break
     except Exception as e:
-        # 💡 빨간색 에러 창 복구!
         st.error(f"⚠️ [{filename}] AI 모델 탐색 에러: {e}")
-        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 모델 탐색 에러: {e}"}
+        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"AI 탐색 에러: {e}"}
     
     if not target_model_name:
         target_model_name = "gemini-1.5-flash"
@@ -153,11 +215,9 @@ def analyze_with_gemini(filename, text_data, geometry_info, api_key):
             
         parsed_data = json.loads(result_text)
         return parsed_data
-        
     except Exception as e:
-        # 💡 빨간색 에러 창 복구!
         st.error(f"⚠️ [{filename}] AI 분석 중 에러 발생: {e}")
-        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"내용 생성 에러: {e}"}
+        return {"도면번호": filename, "품명": "분석 실패", "재질": "SS400", "수량": 1, "가로": 10, "세로": 10, "두께": 10, "후처리": "없음", "비고": f"생성 에러: {e}"}
 
 st.subheader("2. DXF 도면 업로드 및 AI 분석")
 uploaded_files = st.file_uploader("📂 DXF 도면들을 드래그 앤 드롭 하세요.", type=['dxf'], accept_multiple_files=True)
@@ -238,20 +298,25 @@ if uploaded_files:
 
         st.success("✅ AI 도면 분석 및 기초 단가 계산이 완료되었습니다!")
 
-        if os.path.exists(DB_FILE) and not st.session_state.parsed_df.empty:
+        # 💡 과거 이력 조회 (구글 시트 연동)
+        if gc and not st.session_state.parsed_df.empty:
             try:
-                history_db = pd.read_csv(DB_FILE)
-                for idx, row in st.session_state.parsed_df.iterrows():
-                    drw_no = str(row.get('도면번호', ''))
-                    if not drw_no: continue
-                    history_db['도면번호_str'] = history_db['도면번호'].astype(str)
-                    matches = history_db[history_db['도면번호_str'] == drw_no]
-                    if not matches.empty:
-                        last_quote = matches.iloc[-1]
-                        st.warning(f"🕒 **과거 이력 발견!** [{drw_no}] 도면은 기존 견적 이력이 있습니다. \n"
-                                   f"👉 **이전 기록:** 가공비 {last_quote.get('가공비(수동입력)', 0):,}원 / 최종합계 {last_quote.get('최종합계', 0):,}원 (비고: {last_quote.get('비고', '없음')})")
-            except:
-                pass
+                sh = gc.open(SHEET_NAME)
+                ws_q = sh.worksheet("Quote_Database")
+                records = ws_q.get_all_records()
+                if records:
+                    history_db = pd.DataFrame(records)
+                    for idx, row in st.session_state.parsed_df.iterrows():
+                        drw_no = str(row.get('도면번호', ''))
+                        if not drw_no: continue
+                        history_db['도면번호_str'] = history_db['도면번호'].astype(str)
+                        matches = history_db[history_db['도면번호_str'] == drw_no]
+                        if not matches.empty:
+                            last_quote = matches.iloc[-1]
+                            st.warning(f"🕒 **과거 이력 발견!** [{drw_no}] 도면은 구글 시트에 기존 견적 이력이 있습니다. \n"
+                                       f"👉 **이전 기록:** 가공비 {last_quote.get('가공비(수동입력)', 0):,}원 / 최종합계 {last_quote.get('최종합계', 0):,}원 (비고: {last_quote.get('비고', '없음')})")
+            except Exception as e:
+                pass # 구글 시트가 비어있을 땐 조용히 패스
 
         if not st.session_state.parsed_df.empty:
             st.markdown("---")
@@ -275,13 +340,23 @@ if uploaded_files:
             st.subheader("4. 💾 견적 확정 및 엑셀 다운로드")
             
             if st.button("🚀 견적 확정 및 엑셀 폼 발행하기"):
-                if os.path.exists(DB_FILE):
-                    final_df.to_csv(DB_FILE, mode='a', header=False, index=False, encoding='utf-8-sig')
+                # 💡 구글 시트(DB)에 누적 저장하기
+                if gc:
+                    try:
+                        sh = gc.open(SHEET_NAME)
+                        ws_q = sh.worksheet("Quote_Database")
+                        data_q = ws_q.get_all_values()
+                        if not data_q: # 비어있으면 헤더(제목)부터 넣기
+                            ws_q.update([final_df.columns.values.tolist()] + final_df.astype(str).values.tolist())
+                        else: # 이미 있으면 그 밑에 추가하기
+                            ws_q.append_rows(final_df.astype(str).values.tolist())
+                        st.success(f"✅ DB 누적 완료! (미래 딥러닝을 위해 구글 시트에 영구 저장되었습니다 📊)")
+                    except Exception as e:
+                        st.error(f"⚠️ 구글 시트 누적 저장 실패: {e}")
                 else:
-                    final_df.to_csv(DB_FILE, mode='w', header=True, index=False, encoding='utf-8-sig')
+                    st.warning("⚠️ 구글 시트와 연결되지 않아 DB 누적이 생략되었습니다.")
                 
-                st.success(f"✅ DB 누적 완료! (미래의 딥러닝 학습 데이터로 소중히 저장되었습니다)")
-                
+                # 엑셀 다운로드
                 template_path = "견적서.xlsx"
                 try:
                     wb = openpyxl.load_workbook(template_path)
@@ -313,6 +388,5 @@ if uploaded_files:
                         file_name="최종견적서_발행.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    
                 except Exception as e:
                     st.error(f"⚠️ 엑셀 템플릿 처리 중 오류: {e}")
